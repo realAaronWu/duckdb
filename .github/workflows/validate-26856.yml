@@ -1,119 +1,54 @@
-name: Validate 26856 Windows and baseline
+name: Validate 26856 final Windows CLI
 on:
   push:
     branches: [codex/validate-26856-windows347]
 permissions:
   contents: read
 jobs:
-  compare:
+  windows-cli:
     runs-on: windows-2022
-    timeout-minutes: 150
+    timeout-minutes: 60
     env:
       GEN: ninja
       CC: clang-cl
       CXX: clang-cl
+      PYTHONUTF8: '0'
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 347a2f3c31d814c663860525d91f6607f2b89698
+          ref: 2842103afa049050ae1d357f532d96850283ee86
           fetch-depth: 0
-          path: candidate
-      - uses: actions/checkout@v4
-        with:
-          ref: dda2e4090494101087e7726581928e6af44dbc34
-          fetch-depth: 0
-          path: baseline
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: ./candidate/.github/actions/ccache-action
+      - uses: ./.github/actions/ccache-action
         with:
           key: win-release-64
-      - uses: ./candidate/.github/actions/setup-msvc-env
-      - name: Record compiler and source identity
+      - uses: ./.github/actions/setup-msvc-env
+      - name: Record legacy Windows encoding and source identity
         shell: bash
         run: |
           mkdir evidence
           clang-cl --version | tee evidence/compiler.txt
-          git -C candidate rev-parse HEAD | tee evidence/candidate-source.txt
-          git -C baseline rev-parse HEAD | tee evidence/baseline-source.txt
-          python -c "import os,platform; print(platform.platform()); print('cpu_count:',os.cpu_count()); print('runner_image:',os.getenv('ImageOS'),os.getenv('ImageVersion'))" | tee evidence/runner.txt
-      - name: Build unchanged candidate
+          git rev-parse HEAD | tee evidence/source.txt
+          python -c "import locale,os,platform; print(platform.platform(),os.cpu_count(),os.getenv('ImageVersion')); print(locale.getpreferredencoding(False)); assert locale.getpreferredencoding(False).lower() == 'cp1252'" | tee evidence/encoding.txt
+      - name: Build unchanged final production source
         shell: bash
-        working-directory: candidate
         run: |
           python scripts/windows_ci.py
-          make windows_release > ../evidence/candidate-build.log 2>&1
-          ./duckdb.exe -version | tee ../evidence/candidate-version.txt
-          sha256sum duckdb.exe test/unittest.exe > ../evidence/candidate-binaries.sha256
-          git diff > ../evidence/candidate-build-patch.diff
-          find . -name CMakeCache.txt -exec cp {} ../evidence/candidate-CMakeCache.txt \;
-      - name: Full candidate CLI suite
+          make windows_release > evidence/build.log 2>&1
+          ./duckdb.exe -version | tee evidence/version.txt
+          sha256sum duckdb.exe test/unittest.exe > evidence/binaries.sha256
+          git diff > evidence/build-patch.diff
+      - name: Complete final CLI suite under cp1252
         shell: bash
-        working-directory: candidate
         run: |
           python -m pip install pytest
-          python -m pytest tools/shell/tests --shell-binary duckdb.exe -q > ../evidence/candidate-cli.log 2>&1
-          cat ../evidence/candidate-cli.log
-      - name: Candidate native counterexamples
-        if: ${{ !cancelled() }}
-        shell: bash
-        working-directory: candidate
-        run: |
-          python - <<'PY'
-          import json, pathlib, subprocess
-          results = {}
-          for name in ['test/sql/settings/operator_memory_limit.test', 'test/sql/storage/test_eviction_queue_dead_nodes_underflow.test']:
-              result = subprocess.run(['test/unittest.exe', name], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
-              key = pathlib.Path(name).stem
-              pathlib.Path('../evidence/candidate-' + key + '.log').write_text(result.stdout)
-              results[name] = result.returncode
-          pathlib.Path('../evidence/candidate-native.json').write_text(json.dumps(results))
-          print(results)
-          PY
-      - name: Build clean separate exact baseline
-        if: ${{ !cancelled() }}
-        shell: bash
-        working-directory: baseline
-        run: |
-          python scripts/windows_ci.py
-          make windows_release > ../evidence/baseline-build.log 2>&1
-          ./duckdb.exe -version | tee ../evidence/baseline-version.txt
-          sha256sum duckdb.exe test/unittest.exe > ../evidence/baseline-binaries.sha256
-          git diff > ../evidence/baseline-build-patch.diff
-          find . -name CMakeCache.txt -exec cp {} ../evidence/baseline-CMakeCache.txt \;
-      - name: Baseline native counterexamples and comparison
-        if: ${{ !cancelled() }}
-        shell: bash
-        working-directory: baseline
-        run: |
-          python - <<'PY'
-          import json, pathlib, re, subprocess
-          results = {}
-          for name in ['test/sql/settings/operator_memory_limit.test', 'test/sql/storage/test_eviction_queue_dead_nodes_underflow.test']:
-              result = subprocess.run(['test/unittest.exe', name], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
-              key = pathlib.Path(name).stem
-              pathlib.Path('../evidence/baseline-' + key + '.log').write_text(result.stdout)
-              results[name] = result.returncode
-          pathlib.Path('../evidence/baseline-native.json').write_text(json.dumps(results))
-          candidate = json.loads(pathlib.Path('../evidence/candidate-native.json').read_text())
-          print('candidate:', candidate, 'baseline:', results)
-          assert candidate == results, 'Candidate/baseline outcomes differ; investigate before readiness'
-          for name, status in results.items():
-              if status:
-                  assert status == 1, 'Unexpected failure/crash status'
-                  key = pathlib.Path(name).stem
-                  line = 102 if 'operator_memory_limit' in name else 56
-                  for label in ['candidate', 'baseline']:
-                      log = pathlib.Path('../evidence/' + label + '-' + key + '.log').read_text()
-                      assert name + ':' + str(line) in log, 'Failure location differs'
-                      assert 'SELECT i % 10 as g, COUNT(*) FROM range(1000000) t(i) GROUP BY 1 ORDER BY 1' in log, 'Failure query differs'
-                      assert 'Out of Memory Error: could not allocate block of size 256.0 KiB' in log, 'Failure class differs'
-                      assert re.search(r'95\.\d MiB/95\.3 MiB used', log), 'Memory cap differs'
-          PY
+          python -m pytest tools/shell/tests --shell-binary duckdb.exe -q > evidence/cli.log 2>&1
+          cat evidence/cli.log
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
-          name: windows-347-baseline-evidence
+          name: windows-284-cli-evidence
           path: evidence
           if-no-files-found: error
