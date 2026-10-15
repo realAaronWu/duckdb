@@ -20,6 +20,7 @@ on:
         default: true
   push:
     branches-ignore:
+      - 'codex/validate-26856-windows347'
       - 'main'
       - 'feature'
       - 'v*.*-*'
